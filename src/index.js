@@ -1,68 +1,79 @@
 import { DurableObject } from "cloudflare:workers";
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
-
-/**
- * Env provides a mechanism to reference bindings declared in wrangler.jsonc within JavaScript
- *
- * @typedef {Object} Env
- * @property {DurableObjectNamespace} MY_DURABLE_OBJECT - The Durable Object namespace binding
- */
-
-/** A Durable Object's behavior is defined in an exported Javascript class */
 export class MyDurableObject extends DurableObject {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param {DurableObjectState} ctx - The interface for interacting with Durable Object state
-	 * @param {Env} env - The interface to reference bindings declared in wrangler.jsonc
-	 */
 	constructor(ctx, env) {
 		super(ctx, env);
+		this.sessions = new Map();
+		// 从休眠中恢复时，重建连接映射
+		this.ctx.getWebSockets().forEach((ws) => {
+			const attachment = ws.deserializeAttachment();
+			if (attachment) this.sessions.set(ws, attachment);
+		});
 	}
 
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param {string} name - The name provided to a Durable Object instance from a Worker
-	 * @returns {Promise<string>} The greeting to be sent back to the Worker
-	 */
-	async sayHello(name) {
-		return `Hello, ${name}!`;
+	async fetch(request) {
+		const url = new URL(request.url);
+
+		// 只处理 WebSocket 升级请求
+		const upgradeHeader = request.headers.get("Upgrade");
+		if (!upgradeHeader || upgradeHeader.toLowerCase() !== "websocket") {
+			return new Response("Video Sync Server is running", { status: 200 });
+		}
+
+		const webSocketPair = new WebSocketPair();
+		const [client, server] = Object.values(webSocketPair);
+
+		// 关键：使用 acceptWebSocket 支持休眠
+		this.ctx.acceptWebSocket(server);
+		const id = crypto.randomUUID();
+		server.serializeAttachment({ id });
+		this.sessions.set(server, { id });
+
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	async webSocketMessage(ws, message) {
+		let data;
+		try { data = JSON.parse(message); } catch { return; }
+
+		// 心跳响应
+		if (data.type === "ping") {
+			ws.send(JSON.stringify({ type: "pong" }));
+			return;
+		}
+
+		// 广播给房间内其他连接
+		this.sessions.forEach((attachment, connectedWs) => {
+			if (connectedWs !== ws) {
+				try { connectedWs.send(message); } catch (e) { }
+			}
+		});
+	}
+
+	async webSocketClose(ws) {
+		this.sessions.delete(ws);
+	}
+
+	async webSocketError(ws) {
+		this.sessions.delete(ws);
 	}
 }
 
 export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param {Request} request - The request submitted to the Worker from the client
-	 * @param {Env} env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param {ExecutionContext} ctx - The execution context of the Worker
-	 * @returns {Promise<Response>} The response to be sent back to the client
-	 */
 	async fetch(request, env, ctx) {
-		// Create a stub to open a communication channel with the Durable Object
-		// instance named "foo".
-		//
-		// Requests from all Workers to the Durable Object instance named "foo"
-		// will go to a single remote Durable Object instance.
-		const stub = env.MY_DURABLE_OBJECT.getByName("foo");
+		const url = new URL(request.url);
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance.
-		const greeting = await stub.sayHello("world");
+		// 只处理 /ws 路径
+		if (url.pathname !== "/ws") {
+			return new Response("Video Sync Server is running", { status: 200 });
+		}
 
-		return new Response(greeting);
+		// 从查询参数获取房间号，默认 "default"
+		const roomId = url.searchParams.get("room") || "default";
+
+		// 同一个房间号永远路由到同一个 Durable Object 实例
+		const stub = env.MY_DURABLE_OBJECT.getByName(roomId);
+
+		return stub.fetch(request);
 	},
 };
