@@ -144,13 +144,6 @@ wss://video-sync-worker.你的子域.workers.dev/ws
 
 把 `wss://.../ws` 填入扩展的「服务器地址」输入框即可。
 
-### 修改扩展默认服务器（可选）
-
-如果你希望别人下载你的扩展后默认就连你的服务器，可以修改两个文件里的默认地址：
-
-- `extension/background.js` 的 `DEFAULT_SERVER`
-- `extension/popup.js` 的 `DEFAULT_SERVER`
-
 ---
 
 ## 常见问题
